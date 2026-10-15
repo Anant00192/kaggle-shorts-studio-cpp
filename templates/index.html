@@ -237,11 +237,15 @@
                     </div>
 
                     <div class="config-item">
-                        <label for="aiUpscaling">AI 4K Upscaler</label>
-                        <select id="aiUpscaling" class="styled-select">
-                            <option value="true" selected>✅ Enabled (Real-ESRGAN AnimeVideoV3)</option>
-                            <option value="false">❌ Disabled (Direct Copy)</option>
+                        <label for="resolutionMode">🎯 Target Resolution</label>
+                        <select id="resolutionMode" class="styled-select">
+                            <option value="2k" selected>⚡ 2K QHD (1440p) — Ultra Fast (~1.5 min/video, for 10-25 shorts)</option>
+                            <option value="4k">🌟 4K UHD (2160p) — Maximum Quality (~3.5 min/video, for 1-5 shorts)</option>
+                            <option value="none">❌ Disabled (Keep original resolution)</option>
                         </select>
+                        <small style="color: #94a3b8; font-size: 0.78rem; margin-top: 4px; display: block;">
+                            2K triggers YouTube VP9/AV1 with lowest compression. 4K delivers full 2160p master.
+                        </small>
                     </div>
                 </div>
             </div>

@@ -749,7 +749,8 @@ def launch_pipeline():
         "cooldown_secs": int(config.get("cooldown_secs", 30)),
         "outro_ratio": config.get("outro_ratio", "every_3rd"),
         "zoom_factor": float(config.get("zoom_factor", 1.08)),
-        "ai_upscaling": bool(config.get("ai_upscaling", True))
+        "ai_upscaling": bool(config.get("ai_upscaling", True)),
+        "resolution": str(config.get("resolution", "2k")).lower()
     }
 
     t = threading.Thread(target=run_sync_and_launch, args=(final_config,), daemon=True)

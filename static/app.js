@@ -52,7 +52,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const zoomFactor = document.getElementById('zoomFactor');
     const zoomVal = document.getElementById('zoomVal');
     const cooldownSecs = document.getElementById('cooldownSecs');
-    const aiUpscaling = document.getElementById('aiUpscaling');
+    const resolutionMode = document.getElementById('resolutionMode');
 
     // Launcher & Monitor
     const launchBtn = document.getElementById('launchBtn');
@@ -843,7 +843,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 outro_ratio: outroRatio ? outroRatio.value : 'every_3rd',
                 zoom_factor: zoomFactor ? parseFloat(zoomFactor.value) : 1.08,
                 cooldown_secs: cooldownSecs ? parseInt(cooldownSecs.value, 10) : 30,
-                ai_upscaling: aiUpscaling ? (aiUpscaling.value === 'true') : true
+                resolution: resolutionMode ? resolutionMode.value : '2k',
+                    ai_upscaling: resolutionMode ? (resolutionMode.value !== 'none') : true
             };
 
             if (!confirm(`Start batch processing for ${studioData.videos.length} short video(s) on Kaggle GPU under @${active.username}?`)) {
