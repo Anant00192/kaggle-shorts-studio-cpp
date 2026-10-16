@@ -663,14 +663,19 @@ def run_sync_and_launch(config):
 
         # Attach dataset sources (including seedvc-master-models for 0s loading)
         dataset_sources = [f"{username}/{dataset_slug}"]
+        found_cache = False
         try:
             for d in (api.dataset_list(user=username, search="seedvc-master-models") or []):
                 if getattr(d, 'ref', '') == f"{username}/seedvc-master-models":
                     dataset_sources.append(f"{username}/seedvc-master-models")
+                    found_cache = True
                     log("⚡ Attached 'seedvc-master-models' dataset -> 0-second instant model loading!")
                     break
         except Exception as _e:
             log(f"Notice: {_e}")
+        if not found_cache:
+            dataset_sources.append("rathinnew/seedvc-master-models")
+            log("⚡ Attached global 'rathinnew/seedvc-master-models' dataset -> 0-second instant model loading!")
 
         k_meta_path = kernel_dir / "kernel-metadata.json"
         k_metadata = {
