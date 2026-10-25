@@ -63,6 +63,13 @@ document.addEventListener('DOMContentLoaded', () => {
     const terminalLogs = document.getElementById('terminalLogs');
     const clearLogBtn = document.getElementById('clearLogBtn');
 
+    // Cloud Dataset Elements
+    const cloudDatasetBadge = document.getElementById('cloudDatasetBadge');
+    const cloudDatasetDesc = document.getElementById('cloudDatasetDesc');
+    const btnDeleteCloudDataset = document.getElementById('btnDeleteCloudDataset');
+    const btnRefreshCloudDataset = document.getElementById('btnRefreshCloudDataset');
+    const autoPurgeCheckbox = document.getElementById('autoPurgeCheckbox');
+
     // --- Range Sliders ---
     if (zoomFactor && zoomVal) {
         zoomFactor.addEventListener('input', (e) => {
@@ -251,6 +258,7 @@ document.addEventListener('DOMContentLoaded', () => {
             const data = await res.json();
             if (data.success) {
                 updateConnectionState(true, `Connected: @${username}`);
+                checkCloudDatasetStatus();
             } else {
                 updateConnectionState(false, data.error || 'Auth failed');
             }
@@ -844,7 +852,8 @@ document.addEventListener('DOMContentLoaded', () => {
                 zoom_factor: zoomFactor ? parseFloat(zoomFactor.value) : 1.08,
                 cooldown_secs: cooldownSecs ? parseInt(cooldownSecs.value, 10) : 30,
                 resolution: resolutionMode ? resolutionMode.value : '2k',
-                    ai_upscaling: resolutionMode ? (resolutionMode.value !== 'none') : true
+                ai_upscaling: resolutionMode ? (resolutionMode.value !== 'none') : true,
+                auto_purge: autoPurgeCheckbox ? autoPurgeCheckbox.checked : true
             };
 
             if (!confirm(`Start batch processing for ${studioData.videos.length} short video(s) on Kaggle GPU under @${active.username}?`)) {
@@ -936,9 +945,95 @@ document.addEventListener('DOMContentLoaded', () => {
         };
     }
 
+    // --- Cloud Dataset Status & Purge Manager ---
+    async function checkCloudDatasetStatus() {
+        if (!cloudDatasetBadge) return;
+        const active = getActiveAccount();
+        if (!active || !active.username) {
+            cloudDatasetBadge.className = 'dataset-sync-badge badge-checking';
+            cloudDatasetBadge.textContent = 'Account Not Selected';
+            if (cloudDatasetDesc) cloudDatasetDesc.textContent = 'Connect or select your Kaggle account in Section 1 to check cloud dataset.';
+            if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = true;
+            return;
+        }
+
+        cloudDatasetBadge.className = 'dataset-sync-badge badge-checking';
+        cloudDatasetBadge.textContent = 'Checking status...';
+
+        try {
+            const res = await apiFetch('/api/kaggle_dataset_status');
+            const data = await res.json();
+            if (data.exists) {
+                cloudDatasetBadge.className = 'dataset-sync-badge badge-exists';
+                cloudDatasetBadge.textContent = '⚠️ Dataset Synced on Cloud';
+                if (cloudDatasetDesc) {
+                    cloudDatasetDesc.innerHTML = `Previous batch dataset <code>${data.dataset}</code> is stored on Kaggle (<strong>${data.file_count || 0} files</strong>). Click "Delete Cloud Dataset" to wipe it before new runs.`;
+                }
+                if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = false;
+            } else {
+                cloudDatasetBadge.className = 'dataset-sync-badge badge-clean';
+                cloudDatasetBadge.textContent = '✅ Cloud Clean (No Old Dataset)';
+                if (cloudDatasetDesc) {
+                    cloudDatasetDesc.textContent = 'No old dataset on Kaggle cloud. Your next batch will be created 100% fresh with 0% risk of stale video mixing.';
+                }
+                if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = true;
+            }
+        } catch (e) {
+            console.error('Error checking cloud dataset:', e);
+            cloudDatasetBadge.className = 'dataset-sync-badge badge-checking';
+            cloudDatasetBadge.textContent = 'Status Unavailable';
+            if (cloudDatasetDesc) cloudDatasetDesc.textContent = 'Could not reach Kaggle API to check dataset status.';
+        }
+    }
+
+    if (btnDeleteCloudDataset) {
+        btnDeleteCloudDataset.addEventListener('click', async () => {
+            const active = getActiveAccount();
+            if (!active || !active.username) {
+                alert('No active Kaggle account selected.');
+                return;
+            }
+            if (!confirm(`Are you sure you want to PERMANENTLY DELETE 'batch-shorts-dataset' from Kaggle cloud (@${active.username})?\n\nThis will wipe all previous videos from Kaggle server and stop any active GPU jobs, ensuring your next batch starts 100% clean.`)) {
+                return;
+            }
+
+            btnDeleteCloudDataset.disabled = true;
+            btnDeleteCloudDataset.textContent = '⏳ Deleting on Kaggle...';
+
+            try {
+                const res = await apiFetch('/api/delete_kaggle_dataset', { method: 'POST' });
+                const data = await res.json();
+                if (data.success) {
+                    alert('✅ Cloud Dataset deleted successfully from Kaggle server!');
+                    if (terminalLogs) {
+                        const ts = new Date().toLocaleTimeString();
+                        terminalLogs.textContent += `\n[${ts}] 🗑️ Cloud dataset deleted from Kaggle server. Cloud is 100% clean.`;
+                        terminalLogs.scrollTop = terminalLogs.scrollHeight;
+                    }
+                } else {
+                    alert('Error deleting dataset: ' + (data.error || 'Unknown error'));
+                }
+            } catch (err) {
+                alert('Request failed: ' + err.message);
+            } finally {
+                btnDeleteCloudDataset.textContent = '🗑️ Delete Cloud Dataset';
+                await checkCloudDatasetStatus();
+            }
+        });
+    }
+
+    if (btnRefreshCloudDataset) {
+        btnRefreshCloudDataset.addEventListener('click', async () => {
+            btnRefreshCloudDataset.textContent = '⏳';
+            await checkCloudDatasetStatus();
+            setTimeout(() => { btnRefreshCloudDataset.textContent = '🔄 Refresh'; }, 500);
+        });
+    }
+
     // --- Init ---
     initKaggleAccounts();
     setupBulkVideosDropzone();
     setupBulkOutrosDropzone();
     loadStudioState();
+    checkCloudDatasetStatus();
 });

@@ -258,6 +258,36 @@
                 <span class="subtitle">Automatic dataset sync, 0-second SeedVC model mounting, and headless background execution.</span>
             </div>
             <div class="card-body">
+                <!-- Cloud Dataset Status & Purge Widget -->
+                <div class="cloud-dataset-box" id="cloudDatasetBox">
+                    <div class="cloud-dataset-header">
+                        <div class="cloud-dataset-info">
+                            <span class="cloud-dataset-icon">☁️</span>
+                            <div>
+                                <div class="cloud-dataset-status-line">
+                                    <span class="cloud-dataset-label">Kaggle Cloud Dataset:</span>
+                                    <span class="dataset-sync-badge badge-checking" id="cloudDatasetBadge">Checking status...</span>
+                                </div>
+                                <p class="cloud-dataset-desc" id="cloudDatasetDesc">Checking if previous batch dataset exists on Kaggle...</p>
+                            </div>
+                        </div>
+                        <div class="cloud-dataset-actions">
+                            <button type="button" class="btn btn-purge-dataset" id="btnDeleteCloudDataset" disabled>
+                                🗑️ Delete Cloud Dataset
+                            </button>
+                            <button type="button" class="btn btn-refresh-dataset" id="btnRefreshCloudDataset" title="Refresh Cloud Dataset Status">
+                                🔄 Refresh
+                            </button>
+                        </div>
+                    </div>
+                    <div class="cloud-dataset-auto-purge-row">
+                        <label class="auto-purge-checkbox-label" title="Always wipe previous cloud dataset before uploading to guarantee 0% stale or mixed videos">
+                            <input type="checkbox" id="autoPurgeCheckbox" checked>
+                            <span><strong>Auto-Purge Previous Dataset:</strong> Always delete old cloud dataset before upload to guarantee 0% stale/mixed videos.</span>
+                        </label>
+                    </div>
+                </div>
+
                 <div class="launch-actions">
                     <button type="button" class="btn btn-hero" id="launchBtn">
                         <span class="btn-icon">🚀</span>

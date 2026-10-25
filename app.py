@@ -192,6 +192,106 @@ def credentials():
         return jsonify({"success": False, "error": f"Authentication failed: {str(e)}"}), 400
 
 # ==========================================
+# Routes: Kaggle Cloud Dataset Management
+# ==========================================
+
+@app.route("/api/kaggle_dataset_status", methods=["GET"])
+def kaggle_dataset_status():
+    u, k = get_request_credentials()
+    if not u or not k:
+        stored = load_stored_credentials()
+        u = stored.get("username", DEFAULT_KAGGLE_USERNAME)
+        k = stored.get("key", DEFAULT_KAGGLE_KEY)
+
+    if not u or not k:
+        return jsonify({"configured": False, "exists": False, "message": "Kaggle credentials not configured"})
+
+    dataset_slug = "batch-shorts-dataset"
+    full_ref = f"{u}/{dataset_slug}"
+    try:
+        api = get_kaggle_api(u, k)
+        existing = api.dataset_list(user=u, search=dataset_slug)
+        found = False
+        for d in (existing or []):
+            if getattr(d, 'ref', '') == full_ref:
+                found = True
+                break
+
+        if not found:
+            return jsonify({
+                "configured": True,
+                "exists": False,
+                "dataset": full_ref,
+                "message": "No dataset found on Kaggle (Clean Cloud State)"
+            })
+
+        file_count = 0
+        try:
+            flist = api.dataset_list_files(full_ref, page_size=100)
+            files = flist.files if hasattr(flist, 'files') else []
+            file_count = len(files)
+        except Exception:
+            file_count = 0
+
+        return jsonify({
+            "configured": True,
+            "exists": True,
+            "dataset": full_ref,
+            "file_count": file_count,
+            "message": f"Dataset '{dataset_slug}' exists on Kaggle ({file_count} files)."
+        })
+    except Exception as e:
+        return jsonify({
+            "configured": True,
+            "exists": False,
+            "error": str(e),
+            "dataset": full_ref
+        })
+
+
+@app.route("/api/delete_kaggle_dataset", methods=["POST"])
+def delete_kaggle_dataset():
+    u, k = get_request_credentials()
+    if not u or not k:
+        stored = load_stored_credentials()
+        u = stored.get("username", DEFAULT_KAGGLE_USERNAME)
+        k = stored.get("key", DEFAULT_KAGGLE_KEY)
+
+    if not u or not k:
+        return jsonify({"success": False, "error": "Kaggle credentials not configured"}), 400
+
+    dataset_slug = "batch-shorts-dataset"
+    kernel_slug = "batch-shorts-generator"
+    full_ref = f"{u}/{dataset_slug}"
+
+    try:
+        api = get_kaggle_api(u, k)
+
+        # Cancel/delete any running kernel session if present
+        try:
+            api.kernels_delete(f"{u}/{kernel_slug}", no_confirm=True)
+            log(f"🛑 Cancelled and removed active kernel '{u}/{kernel_slug}'.")
+        except Exception:
+            pass
+
+        # Delete dataset
+        api.dataset_delete(u, dataset_slug, no_confirm=True)
+        log(f"🗑️ Purged Kaggle cloud dataset '{full_ref}'. Cloud is now clean for new batches!")
+
+        app_state["status"] = "idle"
+        app_state["progress"] = 0
+        app_state["message"] = "Cloud dataset purged successfully. Ready for a clean new batch!"
+
+        return jsonify({
+            "success": True,
+            "message": f"Successfully deleted '{full_ref}' and any active kernels from Kaggle!"
+        })
+    except Exception as e:
+        err_msg = str(e)
+        log(f"⚠️ Error while deleting dataset '{full_ref}': {err_msg}")
+        return jsonify({"success": False, "error": err_msg}), 500
+
+# ==========================================
 # Routes: Assets Management
 # ==========================================
 
@@ -606,35 +706,69 @@ def run_sync_and_launch(config):
 
         api = get_kaggle_api(username, key)
         exists = False
+        current_ver = 0
         try:
             existing = api.dataset_list(user=username, search=dataset_slug)
             for d in (existing or []):
                 if getattr(d, 'ref', '') == f"{username}/{dataset_slug}":
                     exists = True
                     break
+            if exists:
+                try:
+                    st_info = json.loads(api.dataset_status(f"{username}/{dataset_slug}", format="json"))
+                    current_ver = int(st_info.get("current_version_number", 0))
+                except Exception:
+                    current_ver = 0
         except Exception as e:
             log(f"Dataset lookup notice: {e}")
 
+        auto_purge = config.get("auto_purge", True)
+        if auto_purge and exists:
+            log(f"🗑️ Auto-Purge: Deleting previous cloud dataset '{username}/{dataset_slug}' to guarantee 0% stale/mixed videos...")
+            try:
+                api.dataset_delete(username, dataset_slug, no_confirm=True)
+                log("✅ Previous cloud dataset deleted successfully from Kaggle.")
+                exists = False
+                current_ver = 0
+                time.sleep(2)
+            except Exception as purge_err:
+                log(f"Notice during auto-purge: {purge_err}")
+
         if exists:
-            log(f"Dataset '{dataset_slug}' exists. Creating new version...")
+            log(f"Dataset '{dataset_slug}' exists (Current Version {current_ver}). Creating new version...")
             res = api.dataset_create_version(str(ds_dir), version_notes=f"Batch Shorts run {time.strftime('%Y-%m-%d %H:%M')}", dir_mode="zip")
             log(f"Dataset version created: {res}")
         else:
-            log(f"Creating new private dataset '{dataset_slug}'...")
+            log(f"Creating fresh private dataset '{dataset_slug}'...")
             res = api.dataset_create_new(str(ds_dir), public=False, dir_mode="zip")
             log(f"Dataset created: {res}")
 
-        app_state["message"] = "Waiting for Kaggle to index dataset..."
-        log("Waiting for Kaggle dataset to become READY...")
-        for _ in range(25):
+        target_ver = current_ver + 1 if exists else 1
+        app_state["message"] = f"Waiting for Kaggle to index dataset (v{target_ver})..."
+        log(f"Waiting for Kaggle dataset to become READY (targeting Version {target_ver})...")
+
+        indexed = False
+        for attempt in range(60):
             try:
-                ds_status = str(api.dataset_status(f"{username}/{dataset_slug}")).lower()
-                if "ready" in ds_status:
-                    log("✅ Dataset is READY on Kaggle!")
+                st_json = api.dataset_status(f"{username}/{dataset_slug}", format="json")
+                st_data = json.loads(st_json) if isinstance(st_json, str) else {}
+                st_val = str(st_data.get("status", "")).lower()
+                v_num = int(st_data.get("current_version_number", 0))
+                if (attempt + 1) % 5 == 0 or v_num >= target_ver:
+                    log(f"Kaggle Dataset Indexing: Version {v_num} (target {target_ver}) | Status: {st_val} (check {attempt+1}/60)")
+                if st_val == "error":
+                    raise RuntimeError(f"Kaggle dataset indexing failed with status: {st_val}")
+                if v_num >= target_ver and "ready" in st_val:
+                    log(f"✅ Dataset Version {v_num} is READY and fully indexed on Kaggle!")
+                    indexed = True
                     break
-            except Exception:
-                pass
+            except Exception as e:
+                if (attempt + 1) % 5 == 0:
+                    log(f"Dataset status check: {e}")
             time.sleep(3)
+
+        if not indexed:
+            log("⚠️ Warning: Dataset indexing wait finished; proceeding with kernel push...")
 
         app_state["progress"] = 60
         app_state["status"] = "pushing"
@@ -783,15 +917,21 @@ def monitor_kernel_background():
                 if req_u and req_k:
                     api = get_kaggle_api(req_u, req_k)
                     kernel_ref = f"{req_u}/batch-shorts-generator"
-                    st_resp = api.kernel_status(kernel_ref)
-                    status_str = str(st_resp.get("status", "")).lower()
+                    st_resp = api.kernels_status(kernel_ref)
+                    status_str = str(getattr(st_resp, 'status', st_resp)).lower()
                     app_state["last_kernel_status"] = status_str
 
                     # Fetch live output log
                     try:
-                        out_resp = api.kernel_output(kernel_ref)
-                        log_text = out_resp.get("log", "")
+                        log_text = api.kernels_logs(kernel_ref) or ""
                         if log_text:
+                            # if log_text is JSON formatted
+                            try:
+                                l_items = json.loads(log_text)
+                                l_lines = [it.get("data", "") for it in l_items if "data" in it]
+                                log_text = "".join(l_lines)
+                            except Exception:
+                                pass
                             for line in log_text.strip().split("\n")[-10:]:
                                 if line and line not in app_state["logs"]:
                                     app_state["logs"].append(line)
@@ -806,7 +946,7 @@ def monitor_kernel_background():
                         app_state["progress"] = 90
 
                         try:
-                            api.kernels_output(kernel_ref, path=str(OUTPUT_DIR))
+                            api.kernels_output(kernel_ref, str(OUTPUT_DIR))
                             for z in ["all_final_videos.zip", "all_final_shorts.zip"]:
                                 if (OUTPUT_DIR / z).exists():
                                     app_state["output_file"] = z
@@ -822,8 +962,18 @@ def monitor_kernel_background():
 
                     elif "error" in status_str or "cancel" in status_str:
                         app_state["status"] = "error"
-                        app_state["message"] = f"Kaggle kernel ended with status: {status_str}"
-                        log(f"❌ Kernel failed with status: {status_str}")
+                        fail_msg = getattr(st_resp, 'failure_message', getattr(st_resp, 'failureMessage', ''))
+                        if fail_msg:
+                            app_state["message"] = f"Kaggle run failed: {fail_msg}"
+                        else:
+                            app_state["message"] = f"Kaggle kernel ended with status: {status_str}"
+                        log(f"❌ Kernel failed with status: {status_str} ({fail_msg})")
+                        try:
+                            l_err = api.kernels_logs(kernel_ref)
+                            if l_err:
+                                log(f"Last kernel logs:\n{l_err[-1000:]}")
+                        except Exception:
+                            pass
 
         except Exception as e:
             pass
