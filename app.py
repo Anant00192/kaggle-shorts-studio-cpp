@@ -7,6 +7,17 @@ import re
 import threading
 import time
 from pathlib import Path
+
+# Force IPv4 to prevent hanging on misconfigured IPv6 routes for Google APIs
+try:
+    import socket
+    import urllib3.util.connection as urllib_conn
+    def _force_ipv4():
+        return socket.AF_INET
+    urllib_conn.allowed_gai_family = _force_ipv4
+except Exception:
+    pass
+
 from flask import Flask, render_template, request, jsonify, send_file, make_response
 from werkzeug.utils import secure_filename
 
@@ -129,6 +140,15 @@ def get_kaggle_api(username=None, key=None):
     os.environ["KAGGLE_USERNAME"] = username
     os.environ["KAGGLE_KEY"] = key
     os.environ["KAGGLE_API_TOKEN"] = key
+
+    try:
+        k_dir = Path.home() / ".kaggle"
+        k_dir.mkdir(parents=True, exist_ok=True)
+        (k_dir / "access_token").write_text(key.strip())
+        (k_dir / "kaggle.json").write_text(json.dumps({"username": username, "key": key}))
+        os.chmod(k_dir / "kaggle.json", 0o600)
+    except Exception:
+        pass
 
     api = KaggleApi()
     api.authenticate()
