@@ -849,10 +849,13 @@ def run_sync_and_launch(config):
             nb = json.load(f)
 
         # Force RUN_MODE = 'batch' and embed runtime config override
+        config_json_str = json.dumps(json.dumps(config))
         nb["cells"][5]["source"] = [
             "print('=== 5. Run Mode Switch ===')\n",
             "RUN_MODE = 'batch'   # Auto-set by Kaggle Batch Shorts Studio\n",
-            f"OVERRIDE_CONFIG = {json.dumps(config)}\n",
+            "true, false, null = True, False, None\n",
+            "import json\n",
+            f"OVERRIDE_CONFIG = json.loads({config_json_str})\n",
             "print(f\"RUN_MODE = '{RUN_MODE}'\")\n"
         ]
 
