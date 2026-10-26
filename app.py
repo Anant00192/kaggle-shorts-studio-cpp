@@ -852,7 +852,8 @@ def run_sync_and_launch(config):
                     break
         except Exception as _e:
             log(f"Notice: {_e}")
-        if not found_cache:
+        # Attach rathinnew/seedvc-master-models only if user has access (e.g. rathinnew)
+        if not found_cache and username == "rathinnew":
             dataset_sources.append("rathinnew/seedvc-master-models")
             log("⚡ Attached global 'rathinnew/seedvc-master-models' dataset -> 0-second instant model loading!")
 
