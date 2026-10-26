@@ -66,9 +66,15 @@ document.addEventListener('DOMContentLoaded', () => {
     // Cloud Dataset Elements
     const cloudDatasetBadge = document.getElementById('cloudDatasetBadge');
     const cloudDatasetDesc = document.getElementById('cloudDatasetDesc');
+    const btnUseCloudDataset = document.getElementById('btnUseCloudDataset');
     const btnDeleteCloudDataset = document.getElementById('btnDeleteCloudDataset');
     const btnRefreshCloudDataset = document.getElementById('btnRefreshCloudDataset');
     const autoPurgeCheckbox = document.getElementById('autoPurgeCheckbox');
+
+    let useExistingCloudDataset = false;
+    let detectedDatasetSlug = 'batch-shorts-dataset';
+    let detectedDatasetRef = '';
+    let detectedFileCount = 0;
 
     // --- Range Sliders ---
     if (zoomFactor && zoomVal) {
@@ -827,7 +833,58 @@ document.addEventListener('DOMContentLoaded', () => {
 
     if (launchBtn) {
         launchBtn.addEventListener('click', async () => {
-            // Check reference voice
+            const active = getActiveAccount();
+            if (!active || !active.username) {
+                alert('Please configure your Kaggle Account in Section 1.');
+                return;
+            }
+
+            if (useExistingCloudDataset) {
+                if (!confirm(`Start batch processing on Kaggle GPU under @${active.username} using existing cloud dataset '${detectedDatasetRef || detectedDatasetSlug}' (${detectedFileCount} files)?\n\nLocal video upload will be bypassed.`)) {
+                    return;
+                }
+
+                const config = {
+                    kaggle_username: active.username,
+                    kaggle_key: active.key || '',
+                    outro_ratio: outroRatio ? outroRatio.value : 'every_3rd',
+                    zoom_factor: zoomFactor ? parseFloat(zoomFactor.value) : 1.08,
+                    cooldown_secs: cooldownSecs ? parseInt(cooldownSecs.value, 10) : 30,
+                    resolution: resolutionMode ? resolutionMode.value : '2k',
+                    ai_upscaling: resolutionMode ? (resolutionMode.value !== 'none') : true,
+                    auto_purge: false,
+                    use_existing_dataset: true,
+                    dataset_slug: detectedDatasetSlug || 'batch-shorts-dataset'
+                };
+
+                launchBtn.disabled = true;
+                launchBtn.classList.add('btn-disabled');
+
+                try {
+                    const res = await apiFetch('/api/launch', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(config)
+                    });
+                    const text = await res.text();
+                    let data;
+                    try {
+                        data = JSON.parse(text);
+                    } catch (parseErr) {
+                        throw new Error(`Server error (${res.status}): ${text.substring(0, 120)}`);
+                    }
+                    if (!data.success) throw new Error(data.error || 'Pipeline launch failed');
+
+                    startPolling();
+                } catch (err) {
+                    alert('Launch failed: ' + err.message);
+                    launchBtn.disabled = false;
+                    launchBtn.classList.remove('btn-disabled');
+                }
+                return;
+            }
+
+            // Normal Flow: Check reference voice & videos
             if (!studioData.globals.voice) {
                 alert('Please upload a Reference Voice sample in Section 2 (required for SeedVC voice conversion).');
                 return;
@@ -839,12 +896,6 @@ document.addEventListener('DOMContentLoaded', () => {
                 return;
             }
 
-            const active = getActiveAccount();
-            if (!active || !active.username) {
-                alert('Please configure your Kaggle Account in Section 1.');
-                return;
-            }
-
             const config = {
                 kaggle_username: active.username,
                 kaggle_key: active.key || '',
@@ -853,7 +904,9 @@ document.addEventListener('DOMContentLoaded', () => {
                 cooldown_secs: cooldownSecs ? parseInt(cooldownSecs.value, 10) : 30,
                 resolution: resolutionMode ? resolutionMode.value : '2k',
                 ai_upscaling: resolutionMode ? (resolutionMode.value !== 'none') : true,
-                auto_purge: autoPurgeCheckbox ? autoPurgeCheckbox.checked : true
+                auto_purge: autoPurgeCheckbox ? autoPurgeCheckbox.checked : true,
+                use_existing_dataset: false,
+                dataset_slug: detectedDatasetSlug || 'batch-shorts-dataset'
             };
 
             if (!confirm(`Start batch processing for ${studioData.videos.length} short video(s) on Kaggle GPU under @${active.username}?`)) {
@@ -954,6 +1007,7 @@ document.addEventListener('DOMContentLoaded', () => {
             cloudDatasetBadge.textContent = 'Account Not Selected';
             if (cloudDatasetDesc) cloudDatasetDesc.textContent = 'Connect or select your Kaggle account in Section 1 to check cloud dataset.';
             if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = true;
+            if (btnUseCloudDataset) btnUseCloudDataset.disabled = true;
             return;
         }
 
@@ -964,19 +1018,49 @@ document.addEventListener('DOMContentLoaded', () => {
             const res = await apiFetch('/api/kaggle_dataset_status');
             const data = await res.json();
             if (data.exists) {
-                cloudDatasetBadge.className = 'dataset-sync-badge badge-exists';
-                cloudDatasetBadge.textContent = '⚠️ Dataset Synced on Cloud';
-                if (cloudDatasetDesc) {
-                    cloudDatasetDesc.innerHTML = `Previous batch dataset <code>${data.dataset}</code> is stored on Kaggle (<strong>${data.file_count || 0} files</strong>). Click "Delete Cloud Dataset" to wipe it before new runs.`;
-                }
+                detectedDatasetSlug = data.dataset_slug || 'batch-shorts-dataset';
+                detectedDatasetRef = data.dataset || `${active.username}/${detectedDatasetSlug}`;
+                detectedFileCount = data.file_count || 0;
+
                 if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = false;
+                if (btnUseCloudDataset) btnUseCloudDataset.disabled = false;
+
+                if (useExistingCloudDataset) {
+                    cloudDatasetBadge.className = 'dataset-sync-badge badge-active-use';
+                    cloudDatasetBadge.textContent = `⚡ Selected: ${detectedDatasetSlug} (${detectedFileCount} files)`;
+                    if (cloudDatasetDesc) {
+                        cloudDatasetDesc.innerHTML = `<span style="color: #34d399;">⚡ <strong>Active Mode:</strong> Ready to run directly against <code>${detectedDatasetRef}</code> (${detectedFileCount} files). No local videos will be re-uploaded.</span>`;
+                    }
+                    if (btnUseCloudDataset) {
+                        btnUseCloudDataset.classList.add('active-mode');
+                        btnUseCloudDataset.innerHTML = '✅ Using Cloud Dataset';
+                    }
+                } else {
+                    cloudDatasetBadge.className = 'dataset-sync-badge badge-exists';
+                    cloudDatasetBadge.textContent = `⚠️ Cloud Dataset: ${detectedDatasetSlug} (${detectedFileCount} files)`;
+                    if (cloudDatasetDesc) {
+                        cloudDatasetDesc.innerHTML = `Cloud dataset <code>${detectedDatasetRef}</code> is stored on Kaggle (<strong>${detectedFileCount} files</strong>). Click <strong>"⚡ Use This Cloud Dataset"</strong> to run directly without re-uploading, or <strong>"🗑️ Delete Cloud Dataset"</strong> to wipe it.`;
+                    }
+                    if (btnUseCloudDataset) {
+                        btnUseCloudDataset.classList.remove('active-mode');
+                        btnUseCloudDataset.innerHTML = '⚡ Use This Cloud Dataset';
+                    }
+                }
             } else {
+                useExistingCloudDataset = false;
                 cloudDatasetBadge.className = 'dataset-sync-badge badge-clean';
                 cloudDatasetBadge.textContent = '✅ Cloud Clean (No Old Dataset)';
                 if (cloudDatasetDesc) {
                     cloudDatasetDesc.textContent = 'No old dataset on Kaggle cloud. Your next batch will be created 100% fresh with 0% risk of stale video mixing.';
                 }
                 if (btnDeleteCloudDataset) btnDeleteCloudDataset.disabled = true;
+                if (btnUseCloudDataset) {
+                    btnUseCloudDataset.disabled = true;
+                    btnUseCloudDataset.classList.remove('active-mode');
+                    btnUseCloudDataset.innerHTML = '⚡ Use This Cloud Dataset';
+                }
+                const btnText = launchBtn ? launchBtn.querySelector('.btn-text') : null;
+                if (btnText) btnText.textContent = 'Sync & Start Batch Shorts on Kaggle GPU';
             }
         } catch (e) {
             console.error('Error checking cloud dataset:', e);
@@ -986,6 +1070,40 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     }
 
+    if (btnUseCloudDataset) {
+        btnUseCloudDataset.addEventListener('click', () => {
+            useExistingCloudDataset = !useExistingCloudDataset;
+            const btnText = launchBtn ? launchBtn.querySelector('.btn-text') : null;
+
+            if (useExistingCloudDataset) {
+                btnUseCloudDataset.classList.add('active-mode');
+                btnUseCloudDataset.innerHTML = '✅ Using Cloud Dataset';
+                cloudDatasetBadge.className = 'dataset-sync-badge badge-active-use';
+                cloudDatasetBadge.textContent = `⚡ Selected: ${detectedDatasetSlug} (${detectedFileCount} files)`;
+                if (cloudDatasetDesc) {
+                    cloudDatasetDesc.innerHTML = `<span style="color: #34d399;">⚡ <strong>Active Mode:</strong> Ready to run directly against <code>${detectedDatasetRef}</code> (${detectedFileCount} files). No local videos will be re-uploaded.</span>`;
+                }
+                if (autoPurgeCheckbox) autoPurgeCheckbox.checked = false;
+                if (btnText) btnText.textContent = `⚡ Start Batch on GPU (Using ${detectedDatasetSlug})`;
+                if (terminalLogs) {
+                    const ts = new Date().toLocaleTimeString();
+                    terminalLogs.textContent += `\n[${ts}] ⚡ Reusing cloud dataset '${detectedDatasetRef}' (${detectedFileCount} files). Local video upload will be skipped.`;
+                    terminalLogs.scrollTop = terminalLogs.scrollHeight;
+                }
+            } else {
+                btnUseCloudDataset.classList.remove('active-mode');
+                btnUseCloudDataset.innerHTML = '⚡ Use This Cloud Dataset';
+                if (btnText) btnText.textContent = 'Sync & Start Batch Shorts on Kaggle GPU';
+                if (terminalLogs) {
+                    const ts = new Date().toLocaleTimeString();
+                    terminalLogs.textContent += `\n[${ts}] 🔄 Switched back to normal upload mode.`;
+                    terminalLogs.scrollTop = terminalLogs.scrollHeight;
+                }
+                checkCloudDatasetStatus();
+            }
+        });
+    }
+
     if (btnDeleteCloudDataset) {
         btnDeleteCloudDataset.addEventListener('click', async () => {
             const active = getActiveAccount();
@@ -993,21 +1111,28 @@ document.addEventListener('DOMContentLoaded', () => {
                 alert('No active Kaggle account selected.');
                 return;
             }
-            if (!confirm(`Are you sure you want to PERMANENTLY DELETE 'batch-shorts-dataset' from Kaggle cloud (@${active.username})?\n\nThis will wipe all previous videos from Kaggle server and stop any active GPU jobs, ensuring your next batch starts 100% clean.`)) {
+            const targetSlug = detectedDatasetSlug || 'batch-shorts-dataset';
+            if (!confirm(`Are you sure you want to PERMANENTLY DELETE '${targetSlug}' from Kaggle cloud (@${active.username})?\n\nThis will wipe all previous videos from Kaggle server and stop any active GPU jobs, ensuring your next batch starts 100% clean.`)) {
                 return;
             }
 
             btnDeleteCloudDataset.disabled = true;
             btnDeleteCloudDataset.textContent = '⏳ Deleting on Kaggle...';
+            if (btnUseCloudDataset) btnUseCloudDataset.disabled = true;
 
             try {
-                const res = await apiFetch('/api/delete_kaggle_dataset', { method: 'POST' });
+                const res = await apiFetch('/api/delete_kaggle_dataset', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ dataset_slug: targetSlug })
+                });
                 const data = await res.json();
                 if (data.success) {
-                    alert('✅ Cloud Dataset deleted successfully from Kaggle server!');
+                    useExistingCloudDataset = false;
+                    alert(`✅ Cloud Dataset '${targetSlug}' deleted successfully from Kaggle server!`);
                     if (terminalLogs) {
                         const ts = new Date().toLocaleTimeString();
-                        terminalLogs.textContent += `\n[${ts}] 🗑️ Cloud dataset deleted from Kaggle server. Cloud is 100% clean.`;
+                        terminalLogs.textContent += `\n[${ts}] 🗑️ Cloud dataset '${targetSlug}' deleted from Kaggle server. Cloud is 100% clean.`;
                         terminalLogs.scrollTop = terminalLogs.scrollHeight;
                     }
                 } else {

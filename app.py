@@ -206,28 +206,56 @@ def kaggle_dataset_status():
     if not u or not k:
         return jsonify({"configured": False, "exists": False, "message": "Kaggle credentials not configured"})
 
-    dataset_slug = "batch-shorts-dataset"
-    full_ref = f"{u}/{dataset_slug}"
+    req_slug = request.args.get("dataset_slug")
     try:
         api = get_kaggle_api(u, k)
-        existing = api.dataset_list(user=u, search=dataset_slug)
-        found = False
-        for d in (existing or []):
-            if getattr(d, 'ref', '') == full_ref:
-                found = True
-                break
+        user_datasets = api.dataset_list(user=u) or []
 
-        if not found:
+        target_ds = None
+        if req_slug:
+            for d in user_datasets:
+                ref = getattr(d, 'ref', '')
+                slug = ref.split('/')[-1] if '/' in ref else ref
+                if slug == req_slug or ref == f"{u}/{req_slug}":
+                    target_ds = d
+                    break
+        else:
+            # 1. Look for default batch-shorts-dataset
+            for d in user_datasets:
+                if getattr(d, 'ref', '') == f"{u}/batch-shorts-dataset":
+                    target_ds = d
+                    break
+            # 2. Look for shorts-batch-*
+            if not target_ds:
+                for d in user_datasets:
+                    ref = getattr(d, 'ref', '')
+                    slug = ref.split('/')[-1] if '/' in ref else ref
+                    if slug.startswith("shorts-batch"):
+                        target_ds = d
+                        break
+            # 3. Look for any dataset containing 'shorts'
+            if not target_ds:
+                for d in user_datasets:
+                    ref = getattr(d, 'ref', '')
+                    slug = ref.split('/')[-1] if '/' in ref else ref
+                    if "shorts" in slug.lower():
+                        target_ds = d
+                        break
+
+        if not target_ds:
             return jsonify({
                 "configured": True,
                 "exists": False,
-                "dataset": full_ref,
-                "message": "No dataset found on Kaggle (Clean Cloud State)"
+                "dataset": f"{u}/batch-shorts-dataset",
+                "dataset_slug": "batch-shorts-dataset",
+                "message": "No shorts dataset found on Kaggle (Clean Cloud State)"
             })
 
+        found_ref = getattr(target_ds, 'ref', '')
+        found_slug = found_ref.split('/')[-1] if '/' in found_ref else found_ref
         file_count = 0
         try:
-            flist = api.dataset_list_files(full_ref, page_size=100)
+            flist = api.dataset_list_files(found_ref, page_size=100)
             files = flist.files if hasattr(flist, 'files') else []
             file_count = len(files)
         except Exception:
@@ -236,16 +264,18 @@ def kaggle_dataset_status():
         return jsonify({
             "configured": True,
             "exists": True,
-            "dataset": full_ref,
+            "dataset": found_ref,
+            "dataset_slug": found_slug,
             "file_count": file_count,
-            "message": f"Dataset '{dataset_slug}' exists on Kaggle ({file_count} files)."
+            "message": f"Dataset '{found_slug}' exists on Kaggle ({file_count} files)."
         })
     except Exception as e:
         return jsonify({
             "configured": True,
             "exists": False,
             "error": str(e),
-            "dataset": full_ref
+            "dataset": f"{u}/batch-shorts-dataset",
+            "dataset_slug": "batch-shorts-dataset"
         })
 
 
@@ -260,7 +290,8 @@ def delete_kaggle_dataset():
     if not u or not k:
         return jsonify({"success": False, "error": "Kaggle credentials not configured"}), 400
 
-    dataset_slug = "batch-shorts-dataset"
+    payload = request.get_json(silent=True) or {}
+    dataset_slug = payload.get("dataset_slug") or request.args.get("dataset_slug") or "batch-shorts-dataset"
     kernel_slug = "batch-shorts-generator"
     full_ref = f"{u}/{dataset_slug}"
 
@@ -280,7 +311,7 @@ def delete_kaggle_dataset():
 
         app_state["status"] = "idle"
         app_state["progress"] = 0
-        app_state["message"] = "Cloud dataset purged successfully. Ready for a clean new batch!"
+        app_state["message"] = f"Cloud dataset '{dataset_slug}' purged successfully. Ready for a clean new batch!"
 
         return jsonify({
             "success": True,
@@ -606,11 +637,6 @@ def clear_all():
 
 def run_sync_and_launch(config):
     try:
-        app_state["status"] = "syncing"
-        app_state["progress"] = 10
-        app_state["message"] = "Preparing batch shorts dataset..."
-        log("=== Starting Batch Shorts Dataset Packaging ===")
-
         username = config.get("kaggle_username")
         key = config.get("kaggle_key")
         if not username or not key:
@@ -620,155 +646,173 @@ def run_sync_and_launch(config):
         if not username:
             raise RuntimeError("Kaggle credentials not configured!")
 
-        dataset_slug = "batch-shorts-dataset"
+        dataset_slug = config.get("dataset_slug") or "batch-shorts-dataset"
         kernel_slug = "batch-shorts-generator"
-
-        ds_dir = STAGING_DIR / "dataset"
-        if ds_dir.exists():
-            shutil.rmtree(ds_dir)
-
-        for sub in ["videos", "voices", "bgms", "outros"]:
-            (ds_dir / sub).mkdir(parents=True, exist_ok=True)
-
-        # 1. Collect all valid short videos
-        valid_videos = [f for f in sorted(VIDEOS_UPLOADS.glob("*"), key=lambda x: x.stat().st_mtime) if not f.name.endswith(".meta.json")]
-        if not valid_videos:
-            for slot_num in range(1, 11):
-                m = [x for x in SLOTS_UPLOADS.glob(f"slot_{slot_num}_video.*") if not x.name.endswith(".meta.json")]
-                if m:
-                    valid_videos.append(m[0])
-
-        if not valid_videos:
-            raise RuntimeError("No short videos found! Please drag & drop at least one short video.")
-
-        log(f"Found {len(valid_videos)} short video(s) to process in batch queue.")
-
-        # Copy videos into dataset
-        for idx, vid_path in enumerate(valid_videos, start=1):
-            ext_v = vid_path.suffix
-            shutil.copy2(vid_path, ds_dir / "videos" / f"{idx:02d}_{vid_path.name}")
-            log(f"Queued Short [{idx}]: '{vid_path.name}'")
-
-        # 2. Copy Global Assets
-        # Reference Voice
-        voice_matches = [m for m in GLOBAL_UPLOADS.glob("voice.*") if not m.name.endswith(".meta.json")]
-        if voice_matches:
-            ext = voice_matches[0].suffix
-            shutil.copy2(voice_matches[0], ds_dir / "voices" / f"global_voice{ext}")
-            shutil.copy2(voice_matches[0], ds_dir / f"voice_ref{ext}")
-            log(f"Applied Reference Voice: {voice_matches[0].name}")
-        else:
-            raise RuntimeError("Reference Voice is required for SeedVC voice conversion!")
-
-        # BGM
-        bgm_matches = [m for m in GLOBAL_UPLOADS.glob("bgm.*") if not m.name.endswith(".meta.json")]
-        if bgm_matches:
-            ext = bgm_matches[0].suffix
-            shutil.copy2(bgm_matches[0], ds_dir / "bgms" / f"global_bgm{ext}")
-            shutil.copy2(bgm_matches[0], ds_dir / f"bgm{ext}")
-            log(f"Applied Background Music: {bgm_matches[0].name}")
-
-        # Outros (Multiple allowed)
-        valid_outros = [f for f in sorted(OUTROS_UPLOADS.glob("*"), key=lambda x: x.stat().st_mtime) if not f.name.endswith(".meta.json")]
-        if not valid_outros:
-            legacy_o = [m for m in GLOBAL_UPLOADS.glob("outro.*") if not m.name.endswith(".meta.json")]
-            if legacy_o:
-                valid_outros.extend(legacy_o)
-
-        if valid_outros:
-            for i, ov in enumerate(valid_outros):
-                ext_o = ov.suffix
-                shutil.copy2(ov, ds_dir / "outros" / f"outro_{i}{ext_o}")
-                if i == 0:
-                    shutil.copy2(ov, ds_dir / f"outro{ext_o}")
-            log(f"Applied {len(valid_outros)} Outro/Promo clip(s) into dataset.")
-
-
-        # Write config.json
-        cfg_path = ds_dir / "config.json"
-        with open(cfg_path, "w") as f:
-            json.dump(config, f, indent=2)
-        log(f"Generated config.json: {config}")
-
-        # dataset-metadata.json
-        meta_path = ds_dir / "dataset-metadata.json"
-        ds_metadata = {
-            "title": "Automated Batch Shorts Dataset",
-            "id": f"{username}/{dataset_slug}",
-            "licenses": [{"name": "CC0-1.0"}]
-        }
-        with open(meta_path, "w") as f:
-            json.dump(ds_metadata, f, indent=2)
-
-        app_state["progress"] = 30
-        app_state["message"] = "Uploading batch shorts dataset to Kaggle Cloud..."
-        log(f"Syncing dataset '{username}/{dataset_slug}' to Kaggle via API...")
+        use_existing = config.get("use_existing_dataset", False)
 
         api = get_kaggle_api(username, key)
-        exists = False
-        current_ver = 0
-        try:
-            existing = api.dataset_list(user=username, search=dataset_slug)
-            for d in (existing or []):
-                if getattr(d, 'ref', '') == f"{username}/{dataset_slug}":
-                    exists = True
-                    break
-            if exists:
-                try:
-                    st_info = json.loads(api.dataset_status(f"{username}/{dataset_slug}", format="json"))
-                    current_ver = int(st_info.get("current_version_number", 0))
-                except Exception:
-                    current_ver = 0
-        except Exception as e:
-            log(f"Dataset lookup notice: {e}")
 
-        auto_purge = config.get("auto_purge", True)
-        if auto_purge and exists:
-            log(f"🗑️ Auto-Purge: Deleting previous cloud dataset '{username}/{dataset_slug}' to guarantee 0% stale/mixed videos...")
-            try:
-                api.dataset_delete(username, dataset_slug, no_confirm=True)
-                log("✅ Previous cloud dataset deleted successfully from Kaggle.")
-                exists = False
-                current_ver = 0
-                time.sleep(2)
-            except Exception as purge_err:
-                log(f"Notice during auto-purge: {purge_err}")
-
-        if exists:
-            log(f"Dataset '{dataset_slug}' exists (Current Version {current_ver}). Creating new version...")
-            res = api.dataset_create_version(str(ds_dir), version_notes=f"Batch Shorts run {time.strftime('%Y-%m-%d %H:%M')}", dir_mode="zip")
-            log(f"Dataset version created: {res}")
-        else:
-            log(f"Creating fresh private dataset '{dataset_slug}'...")
-            res = api.dataset_create_new(str(ds_dir), public=False, dir_mode="zip")
-            log(f"Dataset created: {res}")
-
-        target_ver = current_ver + 1 if exists else 1
-        app_state["message"] = f"Waiting for Kaggle to index dataset (v{target_ver})..."
-        log(f"Waiting for Kaggle dataset to become READY (targeting Version {target_ver})...")
-
-        indexed = False
-        for attempt in range(60):
+        if use_existing:
+            app_state["status"] = "syncing"
+            app_state["progress"] = 35
+            app_state["message"] = f"Connecting to existing Kaggle dataset '{username}/{dataset_slug}'..."
+            log(f"⚡ 'Use Existing Dataset' mode: Reusing '{username}/{dataset_slug}' directly without re-uploading.")
             try:
                 st_json = api.dataset_status(f"{username}/{dataset_slug}", format="json")
-                st_data = json.loads(st_json) if isinstance(st_json, str) else {}
-                st_val = str(st_data.get("status", "")).lower()
-                v_num = int(st_data.get("current_version_number", 0))
-                if (attempt + 1) % 5 == 0 or v_num >= target_ver:
-                    log(f"Kaggle Dataset Indexing: Version {v_num} (target {target_ver}) | Status: {st_val} (check {attempt+1}/60)")
-                if st_val == "error":
-                    raise RuntimeError(f"Kaggle dataset indexing failed with status: {st_val}")
-                if v_num >= target_ver and "ready" in st_val:
-                    log(f"✅ Dataset Version {v_num} is READY and fully indexed on Kaggle!")
-                    indexed = True
-                    break
+                log(f"✅ Existing dataset '{username}/{dataset_slug}' verified on Kaggle.")
             except Exception as e:
-                if (attempt + 1) % 5 == 0:
-                    log(f"Dataset status check: {e}")
-            time.sleep(3)
+                raise RuntimeError(f"Could not verify existing dataset '{username}/{dataset_slug}': {e}")
+        else:
+            app_state["status"] = "syncing"
+            app_state["progress"] = 10
+            app_state["message"] = "Preparing batch shorts dataset..."
+            log("=== Starting Batch Shorts Dataset Packaging ===")
 
-        if not indexed:
-            log("⚠️ Warning: Dataset indexing wait finished; proceeding with kernel push...")
+            ds_dir = STAGING_DIR / "dataset"
+            if ds_dir.exists():
+                shutil.rmtree(ds_dir)
+
+            for sub in ["videos", "voices", "bgms", "outros"]:
+                (ds_dir / sub).mkdir(parents=True, exist_ok=True)
+
+            # 1. Collect all valid short videos
+            valid_videos = [f for f in sorted(VIDEOS_UPLOADS.glob("*"), key=lambda x: x.stat().st_mtime) if not f.name.endswith(".meta.json")]
+            if not valid_videos:
+                for slot_num in range(1, 11):
+                    m = [x for x in SLOTS_UPLOADS.glob(f"slot_{slot_num}_video.*") if not x.name.endswith(".meta.json")]
+                    if m:
+                        valid_videos.append(m[0])
+
+            if not valid_videos:
+                raise RuntimeError("No short videos found! Please drag & drop at least one short video.")
+
+            log(f"Found {len(valid_videos)} short video(s) to process in batch queue.")
+
+            # Copy videos into dataset
+            for idx, vid_path in enumerate(valid_videos, start=1):
+                ext_v = vid_path.suffix
+                shutil.copy2(vid_path, ds_dir / "videos" / f"{idx:02d}_{vid_path.name}")
+                log(f"Queued Short [{idx}]: '{vid_path.name}'")
+
+            # 2. Copy Global Assets
+            # Reference Voice
+            voice_matches = [m for m in GLOBAL_UPLOADS.glob("voice.*") if not m.name.endswith(".meta.json")]
+            if voice_matches:
+                ext = voice_matches[0].suffix
+                shutil.copy2(voice_matches[0], ds_dir / "voices" / f"global_voice{ext}")
+                shutil.copy2(voice_matches[0], ds_dir / f"voice_ref{ext}")
+                log(f"Applied Reference Voice: {voice_matches[0].name}")
+            else:
+                raise RuntimeError("Reference Voice is required for SeedVC voice conversion!")
+
+            # BGM
+            bgm_matches = [m for m in GLOBAL_UPLOADS.glob("bgm.*") if not m.name.endswith(".meta.json")]
+            if bgm_matches:
+                ext = bgm_matches[0].suffix
+                shutil.copy2(bgm_matches[0], ds_dir / "bgms" / f"global_bgm{ext}")
+                shutil.copy2(bgm_matches[0], ds_dir / f"bgm{ext}")
+                log(f"Applied Background Music: {bgm_matches[0].name}")
+
+            # Outros (Multiple allowed)
+            valid_outros = [f for f in sorted(OUTROS_UPLOADS.glob("*"), key=lambda x: x.stat().st_mtime) if not f.name.endswith(".meta.json")]
+            if not valid_outros:
+                legacy_o = [m for m in GLOBAL_UPLOADS.glob("outro.*") if not m.name.endswith(".meta.json")]
+                if legacy_o:
+                    valid_outros.extend(legacy_o)
+
+            if valid_outros:
+                for i, ov in enumerate(valid_outros):
+                    ext_o = ov.suffix
+                    shutil.copy2(ov, ds_dir / "outros" / f"outro_{i}{ext_o}")
+                    if i == 0:
+                        shutil.copy2(ov, ds_dir / f"outro{ext_o}")
+                log(f"Applied {len(valid_outros)} Outro/Promo clip(s) into dataset.")
+
+
+            # Write config.json
+            cfg_path = ds_dir / "config.json"
+            with open(cfg_path, "w") as f:
+                json.dump(config, f, indent=2)
+            log(f"Generated config.json: {config}")
+
+            # dataset-metadata.json
+            meta_path = ds_dir / "dataset-metadata.json"
+            ds_metadata = {
+                "title": "Automated Batch Shorts Dataset",
+                "id": f"{username}/{dataset_slug}",
+                "licenses": [{"name": "CC0-1.0"}]
+            }
+            with open(meta_path, "w") as f:
+                json.dump(ds_metadata, f, indent=2)
+
+            app_state["progress"] = 30
+            app_state["message"] = "Uploading batch shorts dataset to Kaggle Cloud..."
+            log(f"Syncing dataset '{username}/{dataset_slug}' to Kaggle via API...")
+
+            exists = False
+            current_ver = 0
+            try:
+                existing = api.dataset_list(user=username, search=dataset_slug)
+                for d in (existing or []):
+                    if getattr(d, 'ref', '') == f"{username}/{dataset_slug}":
+                        exists = True
+                        break
+                if exists:
+                    try:
+                        st_info = json.loads(api.dataset_status(f"{username}/{dataset_slug}", format="json"))
+                        current_ver = int(st_info.get("current_version_number", 0))
+                    except Exception:
+                        current_ver = 0
+            except Exception as e:
+                log(f"Dataset lookup notice: {e}")
+
+            auto_purge = config.get("auto_purge", True)
+            if auto_purge and exists:
+                log(f"🗑️ Auto-Purge: Deleting previous cloud dataset '{username}/{dataset_slug}' to guarantee 0% stale/mixed videos...")
+                try:
+                    api.dataset_delete(username, dataset_slug, no_confirm=True)
+                    log("✅ Previous cloud dataset deleted successfully from Kaggle.")
+                    exists = False
+                    current_ver = 0
+                    time.sleep(2)
+                except Exception as purge_err:
+                    log(f"Notice during auto-purge: {purge_err}")
+
+            if exists:
+                log(f"Dataset '{dataset_slug}' exists (Current Version {current_ver}). Creating new version...")
+                res = api.dataset_create_version(str(ds_dir), version_notes=f"Batch Shorts run {time.strftime('%Y-%m-%d %H:%M')}", dir_mode="zip")
+                log(f"Dataset version created: {res}")
+            else:
+                log(f"Creating fresh private dataset '{dataset_slug}'...")
+                res = api.dataset_create_new(str(ds_dir), public=False, dir_mode="zip")
+                log(f"Dataset created: {res}")
+
+            target_ver = current_ver + 1 if exists else 1
+            app_state["message"] = f"Waiting for Kaggle to index dataset (v{target_ver})..."
+            log(f"Waiting for Kaggle dataset to become READY (targeting Version {target_ver})...")
+
+            indexed = False
+            for attempt in range(60):
+                try:
+                    st_json = api.dataset_status(f"{username}/{dataset_slug}", format="json")
+                    st_data = json.loads(st_json) if isinstance(st_json, str) else {}
+                    st_val = str(st_data.get("status", "")).lower()
+                    v_num = int(st_data.get("current_version_number", 0))
+                    if (attempt + 1) % 5 == 0 or v_num >= target_ver:
+                        log(f"Kaggle Dataset Indexing: Version {v_num} (target {target_ver}) | Status: {st_val} (check {attempt+1}/60)")
+                    if st_val == "error":
+                        raise RuntimeError(f"Kaggle dataset indexing failed with status: {st_val}")
+                    if v_num >= target_ver and "ready" in st_val:
+                        log(f"✅ Dataset Version {v_num} is READY and fully indexed on Kaggle!")
+                        indexed = True
+                        break
+                except Exception as e:
+                    if (attempt + 1) % 5 == 0:
+                        log(f"Dataset status check: {e}")
+                time.sleep(3)
+
+            if not indexed:
+                log("⚠️ Warning: Dataset indexing wait finished; proceeding with kernel push...")
 
         app_state["progress"] = 60
         app_state["status"] = "pushing"
@@ -784,10 +828,11 @@ def run_sync_and_launch(config):
         with open(master_nb_path) as f:
             nb = json.load(f)
 
-        # Force RUN_MODE = 'batch'
+        # Force RUN_MODE = 'batch' and embed runtime config override
         nb["cells"][5]["source"] = [
             "print('=== 5. Run Mode Switch ===')\n",
             "RUN_MODE = 'batch'   # Auto-set by Kaggle Batch Shorts Studio\n",
+            f"OVERRIDE_CONFIG = {json.dumps(config)}\n",
             "print(f\"RUN_MODE = '{RUN_MODE}'\")\n"
         ]
 
@@ -882,6 +927,7 @@ def launch_pipeline():
     if not k_user or not k_key:
         return jsonify({"success": False, "error": "No Kaggle account connected! Please enter your credentials."}), 401
 
+    use_existing = bool(config.get("use_existing_dataset", False))
     final_config = {
         "kaggle_username": k_user,
         "kaggle_key": k_key,
@@ -889,7 +935,10 @@ def launch_pipeline():
         "outro_ratio": config.get("outro_ratio", "every_3rd"),
         "zoom_factor": float(config.get("zoom_factor", 1.08)),
         "ai_upscaling": bool(config.get("ai_upscaling", True)),
-        "resolution": str(config.get("resolution", "2k")).lower()
+        "resolution": str(config.get("resolution", "2k")).lower(),
+        "auto_purge": bool(config.get("auto_purge", True)) if not use_existing else False,
+        "use_existing_dataset": use_existing,
+        "dataset_slug": config.get("dataset_slug") or "batch-shorts-dataset"
     }
 
     t = threading.Thread(target=run_sync_and_launch, args=(final_config,), daemon=True)
